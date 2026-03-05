@@ -172,12 +172,24 @@ def convert_single_table(stmt: str, default_buckets: int = 8) -> str:
     # 分桶列：取 key 的第一列
     dist_col = key_cols[0] if key_cols else columns[0][0]
 
-    # ========== 6. 生成 Doris DDL ==========
+    # ========== 6. 按 DUPLICATE KEY 要求排序：KEY 列在前，其余保持原始顺序 ==========
+    key_col_set = set(key_cols)
+    col_map = dict(columns)  # name → def，保留原始值（后出现的同名列会覆盖，极少见）
+    # KEY 列按 key_cols 声明顺序排列
+    ordered_key = [(kc, col_map[kc]) for kc in key_cols if kc in col_map]
+    # 非 KEY 列保持原始 SQL 顺序
+    ordered_non_key = [(name, defn) for name, defn in columns if name not in key_col_set]
+    ordered_columns = ordered_key + ordered_non_key
+
+    # 警告：pk_cols 中有在 columns 里找不到的列（列名解析失败或拼写不一致）
+    missing_key_cols = [kc for kc in key_cols if kc not in col_map]
+
+    # ========== 7. 生成 Doris DDL ==========
     out_lines = []
     out_lines.append(f'CREATE TABLE IF NOT EXISTS `{table_name}` (')
 
     col_defs = []
-    for col_name, col_def in columns:
+    for col_name, col_def in ordered_columns:
         col_defs.append(f'    `{col_name}` {col_def}')
     out_lines.append(',\n'.join(col_defs))
 
@@ -195,6 +207,12 @@ def convert_single_table(stmt: str, default_buckets: int = 8) -> str:
     out_lines.append(f'DISTRIBUTED BY HASH(`{dist_col}`) BUCKETS AUTO;')
 
     result = '\n'.join(out_lines)
+
+    # KEY 列缺失警告
+    if missing_key_cols:
+        result += (
+            f'\n-- ⚠️  KEY 列在列定义中未找到：{missing_key_cols}，请检查主键与列名是否一致'
+        )
 
     # 列数不一致警告
     if parsed_col_count != raw_col_count:
