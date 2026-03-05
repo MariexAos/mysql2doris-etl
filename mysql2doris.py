@@ -71,15 +71,17 @@ def convert_single_table(stmt: str, default_buckets: int = 8) -> str:
     depth = 0
     paren_end = -1
     in_string = False
-    for i in range(paren_start, len(stmt_for_parse)):
+    i = paren_start
+    while i < len(stmt_for_parse):
         ch = stmt_for_parse[i]
         if ch == "'" and not in_string:
             in_string = True
         elif ch == "'" and in_string:
-            # 检查是否是转义的引号 ''
+            # 检查是否是转义的引号 ''，跳过第二个引号
             if i + 1 < len(stmt_for_parse) and stmt_for_parse[i + 1] == "'":
-                continue
-            in_string = False
+                i += 1
+            else:
+                in_string = False
         elif not in_string:
             if ch == '(':
                 depth += 1
@@ -88,6 +90,7 @@ def convert_single_table(stmt: str, default_buckets: int = 8) -> str:
                 if depth == 0:
                     paren_end = i
                     break
+        i += 1
 
     if paren_end == -1:
         return '-- [转换失败: 括号不匹配] ' + stmt
@@ -97,7 +100,7 @@ def convert_single_table(stmt: str, default_buckets: int = 8) -> str:
 
     # ========== 3. 提取表级COMMENT ==========
     table_comment = ''
-    cm = re.search(r"COMMENT\s*=\s*'([^']*)'", tail, re.IGNORECASE)
+    cm = re.search(r"COMMENT\s*=\s*'((?:[^']|'')*)'", tail, re.IGNORECASE)
     if cm:
         table_comment = cm.group(1)
 
@@ -109,6 +112,7 @@ def convert_single_table(stmt: str, default_buckets: int = 8) -> str:
     pk_cols = []        # PRIMARY KEY 列
     unique_indexes = [] # [(index_name, [cols])]
     normal_indexes = [] # [(index_name, [cols])]
+    raw_col_count = 0   # 原始 SQL 中非约束行的列数（与主循环判断逻辑完全一致）
 
     for line in lines:
         line = line.strip().rstrip(',').strip()
@@ -143,10 +147,19 @@ def convert_single_table(stmt: str, default_buckets: int = 8) -> str:
             normal_indexes.append((idx_name, idx_cols))
             continue
 
-        # --- 普通列定义 ---
+        # --- 普通列定义（含行内 PRIMARY KEY，如 `id` int NOT NULL PRIMARY KEY）---
+        raw_col_count += 1
+        # 检测行内 PRIMARY KEY，提取列名并记录，后续在 parse_column 中剥离该关键字
+        inline_pk = re.search(r'\bPRIMARY\s+KEY\b', line, re.IGNORECASE)
+        if inline_pk and not pk_cols:
+            col_name_m = re.match(r'`?(\w+)`?', line)
+            if col_name_m:
+                pk_cols = [col_name_m.group(1)]
         col = parse_column(line)
         if col:
             columns.append(col)
+
+    parsed_col_count = len(columns)
 
     # ========== 5. 确定 Doris KEY 模型 ==========
     # 全部使用 DUPLICATE KEY 模型
@@ -159,28 +172,12 @@ def convert_single_table(stmt: str, default_buckets: int = 8) -> str:
     # 分桶列：取 key 的第一列
     dist_col = key_cols[0] if key_cols else columns[0][0]
 
-    # ========== 6. 对列排序：Doris 要求 KEY 列在前面 ==========
-    key_col_set = set(key_cols)
-    key_columns = []
-    non_key_columns = []
-    col_map = {name: defn for name, defn in columns}
-
-    for kc in key_cols:
-        if kc in col_map:
-            key_columns.append((kc, col_map[kc]))
-
-    for name, defn in columns:
-        if name not in key_col_set:
-            non_key_columns.append((name, defn))
-
-    ordered_columns = key_columns + non_key_columns
-
-    # ========== 7. 生成 Doris DDL ==========
+    # ========== 6. 生成 Doris DDL ==========
     out_lines = []
     out_lines.append(f'CREATE TABLE IF NOT EXISTS `{table_name}` (')
 
     col_defs = []
-    for col_name, col_def in ordered_columns:
+    for col_name, col_def in columns:
         col_defs.append(f'    `{col_name}` {col_def}')
     out_lines.append(',\n'.join(col_defs))
 
@@ -198,6 +195,13 @@ def convert_single_table(stmt: str, default_buckets: int = 8) -> str:
     out_lines.append(f'DISTRIBUTED BY HASH(`{dist_col}`) BUCKETS AUTO;')
 
     result = '\n'.join(out_lines)
+
+    # 列数不一致警告
+    if parsed_col_count != raw_col_count:
+        result += (
+            f'\n-- ⚠️  列数不一致：原始 SQL 解析到 {raw_col_count} 列，'
+            f'实际转换 {parsed_col_count} 列，请检查表结构是否完整'
+        )
 
     # 如果有普通索引/唯一索引，作为注释附在后面供参考
     if unique_indexes or normal_indexes:
@@ -285,8 +289,16 @@ def parse_column(line: str) -> tuple:
     # --- 去除 AUTO_INCREMENT ---
     rest = re.sub(r'\s*AUTO_INCREMENT', '', rest, flags=re.IGNORECASE)
 
+    # --- 去除行内 PRIMARY KEY（Doris 不支持列定义内的 PRIMARY KEY 关键字）---
+    rest = re.sub(r'\s*\bPRIMARY\s+KEY\b', '', rest, flags=re.IGNORECASE)
+
     # --- 去除 ON UPDATE <expr>（如 ON UPDATE CURRENT_TIMESTAMP）---
     rest = re.sub(r'\bON\s+UPDATE\s+\S+(\([^)]*\))?', '', rest, flags=re.IGNORECASE)
+
+    # --- 去除非 NULL 的 DEFAULT，保留 DEFAULT NULL ---
+    # 先处理字符串型 DEFAULT（含 '' 转义），再处理其他类型（数字、函数、关键字等）
+    rest = re.sub(r"\bDEFAULT\s+'(?:[^']|'')*'", '', rest, flags=re.IGNORECASE)
+    rest = re.sub(r'\bDEFAULT\s+(?!NULL\b)\S+(\([^)]*\))?', '', rest, flags=re.IGNORECASE)
 
     # --- 类型转换 ---
 
@@ -343,17 +355,21 @@ def split_columns(body: str) -> list:
     depth = 0
     in_string = False
     current = []
+    i = 0
 
-    for i, ch in enumerate(body):
+    while i < len(body):
+        ch = body[i]
         if ch == "'" and not in_string:
             in_string = True
             current.append(ch)
         elif ch == "'" and in_string:
             current.append(ch)
-            # 检查转义引号 ''
+            # 检查转义引号 ''，跳过第二个引号
             if i + 1 < len(body) and body[i + 1] == "'":
-                continue
-            in_string = False
+                i += 1
+                current.append(body[i])
+            else:
+                in_string = False
         elif in_string:
             current.append(ch)
         elif ch == '(':
@@ -367,6 +383,7 @@ def split_columns(body: str) -> list:
             current = []
         else:
             current.append(ch)
+        i += 1
 
     if current:
         last = ''.join(current).strip()
