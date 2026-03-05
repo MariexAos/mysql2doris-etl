@@ -97,14 +97,14 @@ echo "  skip_lines: ${SKIP_LINES}"
 echo "=========================================="
 
 # ── 提取表名：剥离分表数字后缀 ───────────────────────────────
-# 规则：文件名末尾若为 _<纯数字>，则截掉该部分
-#   orders_1    → orders
-#   orders_10   → orders
-#   orders_abc  → orders_abc  (非纯数字，不处理)
-#   orders      → orders
+# 支持两种分表命名格式：
+#   带下划线分隔：orders_1 / orders_10  → orders
+#   数字直连:     user_info1 / user_info2 → user_info
+#   非数字后缀保持不变：orders_abc       → orders_abc
+#   无后缀:       orders               → orders
 get_table_name() {
     local filename="$1"          # 已去掉 .csv 扩展名的文件名
-    echo "${filename}" | sed -E 's/_[0-9]+$//'
+    echo "${filename}" | sed -E 's/_?[0-9]+$//'
 }
 
 # ── 主循环 ───────────────────────────────────────────────────
@@ -138,6 +138,10 @@ for csv_file in "${csv_files[@]}"; do
 
     # 读取首行作为列名（用原始分隔符替换为逗号）
     header=$(head -1 "$csv_file" | sed "s/${SEPARATOR}/,/g")
+    # 如果有 enclose，将包围符从列名中移除
+    if [ -n "$ENCLOSE" ]; then
+        header=$(echo "$header" | sed "s/${ENCLOSE}//g")
+    fi
 
     # ── 构造可选 Header ──────────────────────────────────────
     extra_headers=()
