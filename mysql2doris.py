@@ -102,6 +102,7 @@ def convert_single_table(stmt: str, default_buckets: int = 8) -> str:
         table_comment = cm.group(1)
 
     # ========== 4. 逐行解析列定义和约束 ==========
+    body = _embed_inline_comments(body)
     lines = split_columns(body)
 
     columns = []        # (col_name, col_def_line)
@@ -209,6 +210,51 @@ def convert_single_table(stmt: str, default_buckets: int = 8) -> str:
             result += f'\n-- INDEX {idx_name} ({cols_str})'
 
     return result
+
+
+def _extract_line_comment(line: str) -> tuple:
+    """
+    从行中提取 -- 行注释（跳过字符串内的 --）。
+    返回 (comment_text, line_without_comment)，无注释时 comment_text 为空字符串。
+    """
+    in_string = False
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "'" and not in_string:
+            in_string = True
+        elif ch == "'" and in_string:
+            if i + 1 < len(line) and line[i + 1] == "'":
+                i += 2
+                continue
+            in_string = False
+        elif not in_string and ch == '-' and i + 1 < len(line) and line[i + 1] == '-':
+            return line[i + 2:].strip(), line[:i]
+        i += 1
+    return '', line
+
+
+def _embed_inline_comments(body: str) -> str:
+    """
+    将列定义体中的 -- 行注释转换为 COMMENT 子句。
+
+    例：`id` INT NOT NULL,  -- 主键
+     → `id` INT NOT NULL COMMENT '主键',
+
+    已有 COMMENT 子句时不重复添加。
+    """
+    result = []
+    for line in body.split('\n'):
+        comment, line_no_cmt = _extract_line_comment(line)
+        if comment and not re.search(r"\bCOMMENT\s*'", line_no_cmt, re.IGNORECASE):
+            comment_escaped = comment.replace("'", "''")
+            stripped = line_no_cmt.rstrip()
+            if stripped.endswith(','):
+                line_no_cmt = stripped[:-1].rstrip() + f" COMMENT '{comment_escaped}',"
+            else:
+                line_no_cmt = stripped + f" COMMENT '{comment_escaped}'"
+        result.append(line_no_cmt)
+    return '\n'.join(result)
 
 
 def parse_column(line: str) -> tuple:
