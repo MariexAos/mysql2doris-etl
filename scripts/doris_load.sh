@@ -24,6 +24,7 @@ SEPARATOR="|+|"
 SKIP_LINES=1
 ENCLOSE=""      # 可选：字段包围符，如 '"'
 ESCAPE=""       # 可选：转义字符，如 '\'
+TABLE_CASE=""   # 可选：表名大小写转换，upper=转大写，lower=转小写，空=保持文件名原样
 
 # ── 帮助函数 ─────────────────────────────────────────────────
 usage() {
@@ -44,6 +45,7 @@ usage() {
       --skip-lines  跳过首行数     (默认: 1)
       --enclose     字段包围符     (可选，如 '"'，不传则不启用)
       --escape      转义字符       (可选，如 '\'，不传则不启用)
+      --table-case  表名大小写     (可选，upper=转大写，lower=转小写，不传则保持原样)
 
 其他:
   -h, --help        显示此帮助
@@ -68,8 +70,9 @@ while [[ $# -gt 0 ]]; do
         -l|--log-dir)    LOG_DIR="$2";    shift 2 ;;
         -s|--separator)  SEPARATOR="$2";  shift 2 ;;
         --skip-lines)    SKIP_LINES="$2"; shift 2 ;;
-        --enclose)       ENCLOSE="$2";    shift 2 ;;
-        --escape)        ESCAPE="$2";     shift 2 ;;
+        --enclose)       ENCLOSE="$2";     shift 2 ;;
+        --escape)        ESCAPE="$2";      shift 2 ;;
+        --table-case)    TABLE_CASE="$2";  shift 2 ;;
         -h|--help)       usage ;;
         *)
             echo "❌ 未知参数: $1，用 -h 查看帮助"
@@ -92,8 +95,9 @@ echo "  目标库:   ${DB}"
 echo "  CSV 目录: ${CSV_DIR}"
 echo "  分隔符:   ${SEPARATOR}"
 echo "  skip_lines: ${SKIP_LINES}"
-[ -n "$ENCLOSE" ] && echo "  enclose:  ${ENCLOSE}"
-[ -n "$ESCAPE"  ] && echo "  escape:   ${ESCAPE}"
+[ -n "$ENCLOSE"     ] && echo "  enclose:    ${ENCLOSE}"
+[ -n "$ESCAPE"      ] && echo "  escape:     ${ESCAPE}"
+[ -n "$TABLE_CASE"  ] && echo "  table-case: ${TABLE_CASE}"
 echo "=========================================="
 
 # ── 提取表名：剥离分表数字后缀 ───────────────────────────────
@@ -141,6 +145,12 @@ for csv_file in "${csv_files[@]}"; do
     filename=$(basename "$csv_file" .csv)
     table_name=$(get_table_name "$filename")
 
+    # 表名大小写转换
+    case "$TABLE_CASE" in
+        upper) table_name=$(echo "$table_name" | tr '[:lower:]' '[:upper:]') ;;
+        lower) table_name=$(echo "$table_name" | tr '[:upper:]' '[:lower:]') ;;
+    esac
+
     # 如果是分表文件，标注来源分片
     if [ "$filename" != "$table_name" ]; then
         shard_info=" [分片: ${filename}]"
@@ -152,9 +162,9 @@ for csv_file in "${csv_files[@]}"; do
 
     # 读取首行作为列名（用原始分隔符替换为逗号）
     header=$(head -1 "$csv_file" | sed "s/${SEPARATOR}/,/g")
-    # 如果有 enclose，将包围符从列名中移除
+    # 如果有 enclose，将包围符从列名中移除（用 bash 参数展开，避免 " 破坏 sed 引号）
     if [ -n "$ENCLOSE" ]; then
-        header=$(echo "$header" | sed "s/${ENCLOSE}//g")
+        header="${header//${ENCLOSE}/}"
     fi
 
     # ── 构造可选 Header ──────────────────────────────────────
