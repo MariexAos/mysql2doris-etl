@@ -97,14 +97,28 @@ echo "  skip_lines: ${SKIP_LINES}"
 echo "=========================================="
 
 # ── 提取表名：剥离分表数字后缀 ───────────────────────────────
-# 支持两种分表命名格式：
-#   带下划线分隔：orders_1 / orders_10  → orders
-#   数字直连:     user_info1 / user_info2 → user_info
-#   非数字后缀保持不变：orders_abc       → orders_abc
-#   无后缀:       orders               → orders
+# 循环两步剥离，直到稳定：
+#   Step1: 剥离 _短代码+数字 后缀（字母≤3位，如 _bta58 / _v2 / _env1）
+#   Step2: 剥离纯数字尾段（含下划线分隔，如 _2023 / 10 / _1）
+# 字母超过3位的段视为表名组成部分，不整段剥离（如 _info1 只剥 1）
+# 示例：
+#   tbinstinfo_bta58          → tbinstinfo
+#   order10_2023 / order9_2024 → order
+#   user_info1 / user_info2   → user_info
+#   orders_1 / orders_10      → orders
+#   orders_abc                → orders_abc（纯字母结尾不处理）
+#   orders                    → orders
 get_table_name() {
-    local filename="$1"          # 已去掉 .csv 扩展名的文件名
-    echo "${filename}" | sed -E 's/_?[0-9]+$//'
+    local filename="$1"
+    local result="${filename}"
+    local prev=""
+    while [ "${result}" != "${prev}" ]; do
+        prev="${result}"
+        result=$(echo "${result}" \
+            | sed -E 's/(_[a-zA-Z]{1,3}[0-9]+|_[0-9]+)+$//' \
+            | sed -E 's/[0-9]+$//')
+    done
+    echo "${result}"
 }
 
 # ── 主循环 ───────────────────────────────────────────────────
